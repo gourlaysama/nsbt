@@ -1,0 +1,6 @@
+[package]
+name = "nsbt"
+version = "0.1.0"
+authors = ["Antoine Gourlay <antoine@gourlay.fr>"]
+
+[dependencies]
