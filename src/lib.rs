@@ -16,37 +16,38 @@ pub struct SbtCodec;
 impl Client {
     pub fn connect(addr: &SocketAddr,
                    handle: Handle)
-                   -> Box<Future<Item = Framed<TcpStream,SbtCodec>, Error = io::Error>> {
+                   -> Box<Future<Item = Framed<TcpStream, SbtCodec>, Error = io::Error>> {
         let transport = TcpStream::connect(addr, &handle).and_then(|socket| {
             let transport = socket.framed(SbtCodec);
 
             let handshake = transport.into_future()
-                .map_err(|(e,_)| e)
-                .and_then(|(line, transport)| {
-                match line {
-                  Some(ref msg) if msg.contains("ChannelAcceptedEvent") => {
-                    println!("Server accepted our channel");
-                    Ok(transport)
-                  }
-                  _ => {
-                    println!("Server handshake invalid!");
-                    let err = io::Error::new(io::ErrorKind::Other, "invalid handshake");
-                    Err(err)
-                  }
-              }
-            });
-            
-           handshake
+                                     .map_err(|(e, _)| e)
+                                     .and_then(|(line, transport)| {
+                                         match line {
+                                             Some(ref msg) if msg.contains("ChannelAcceptedEv\
+                                                                            ent") => {
+                                                 println!("Server accepted our channel");
+                                                 Ok(transport)
+                                             }
+                                             _ => {
+                                                 println!("Server handshake invalid!");
+                                                 let err = io::Error::new(io::ErrorKind::Other,
+                                                                          "invalid handshake");
+                                                 Err(err)
+                                             }
+                                         }
+                                     });
+
+            handshake
         });
 
 
         Box::new(transport)
     }
-
 }
 
 impl Codec for SbtCodec {
-  type In = String;
+    type In = String;
   type Out = String;
 
     fn decode(&mut self, buf: &mut EasyBuf) -> Result<Option<String>, io::Error> {
