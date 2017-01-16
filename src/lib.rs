@@ -3,7 +3,7 @@ extern crate tokio_core;
 extern crate tokio_proto;
 extern crate tokio_service;
 
-use futures::{Future, BoxFuture};
+use futures::{Future, BoxFuture, Stream};
 use tokio_core::io::{Io, Codec, EasyBuf, Framed};
 use tokio_core::net::TcpStream;
 use tokio_core::reactor::Handle;
@@ -77,9 +77,27 @@ impl<T: Io + 'static> ClientProto<T> for SbtProto {
   type Request = String;
   type Response = String;
   type Transport = Framed<T, SbtCodec>;
-  type BindTransport = Result<Self::Transport, io::Error>;
+  type BindTransport = Box<Future<Item = Self::Transport, Error = io::Error>>;
 
     fn bind_transport(&self, io: T) -> Self::BindTransport {
-        Ok(io.framed(SbtCodec))
+        let transport = io.framed(SbtCodec);
+
+        let handshake = transport.into_future()
+            .map_err(|(e,_)| e)
+            .and_then(|(line, transport)| {
+              match line {
+                  Some(ref msg) if msg.contains("ChannelAcceptedEvent") => {
+                    println!("Server accepted our channel");
+                    Ok(transport)
+                  }
+                  _ => {
+                    println!("Server handshake invalid!");
+                    let err = io::Error::new(io::ErrorKind::Other, "invalid handshake");
+                    Err(err)
+                  }
+              }
+            });
+
+        Box::new(handshake)
     }
 }
