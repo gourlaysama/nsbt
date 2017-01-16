@@ -2,11 +2,9 @@ extern crate nsbt;
 
 extern crate futures;
 extern crate tokio_core;
-extern crate tokio_service;
 
-use futures::Future;
+use futures::{Future, Sink, Stream};
 use tokio_core::reactor::Core;
-use tokio_service::Service;
 
 
 fn main() {
@@ -20,11 +18,17 @@ fn main() {
     core.run(
         nsbt::Client::connect(&addr, handle)
             .and_then(|client| {
-                client.call("{\"type\": \"ExecCommand\", \"commandLine\": \"clean\"}".to_string())
-                    .and_then(move |response| {
-                        println!("Got from the server: {:?}", response);
-                        Ok(())
+                client.send("{\"type\": \"ExecCommand\", \"commandLine\": \"clean\"}".to_string())
+                    .and_then(|c| {
+                        println!("Sent clean command to server");
+                        Ok(c)
                     })
+            })
+            .and_then(|client| {
+                client.for_each(|line| {
+                    println!("Received from Server: {}", line);
+                    Ok(())
+                })
             })
         ).unwrap();
 }

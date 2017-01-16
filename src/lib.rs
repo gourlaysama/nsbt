@@ -1,49 +1,48 @@
 extern crate futures;
 extern crate tokio_core;
-extern crate tokio_proto;
-extern crate tokio_service;
 
-use futures::{Future, BoxFuture, Stream};
+use futures::{Future, Stream};
 use tokio_core::io::{Io, Codec, EasyBuf, Framed};
 use tokio_core::net::TcpStream;
 use tokio_core::reactor::Handle;
-use tokio_proto::TcpClient;
-use tokio_proto::pipeline::{ClientProto, ClientService};
-use tokio_service::Service;
 use std::{io, str};
 use std::net::SocketAddr;
 
-pub struct Client {
-    inner: ClientService<TcpStream, SbtProto>,
-}
+pub struct Client;
 
 pub struct SbtCodec;
 
-struct SbtProto;
 
 impl Client {
     pub fn connect(addr: &SocketAddr,
                    handle: Handle)
-                   -> Box<Future<Item = Client, Error = io::Error>> {
-        let ret = TcpClient::new(SbtProto)
-                      .connect(addr, &handle)
-                      .map(|s| Client { inner: s });
+                   -> Box<Future<Item = Framed<TcpStream,SbtCodec>, Error = io::Error>> {
+        let transport = TcpStream::connect(addr, &handle).and_then(|socket| {
+            let transport = socket.framed(SbtCodec);
 
-        Box::new(ret)
+            let handshake = transport.into_future()
+                .map_err(|(e,_)| e)
+                .and_then(|(line, transport)| {
+                match line {
+                  Some(ref msg) if msg.contains("ChannelAcceptedEvent") => {
+                    println!("Server accepted our channel");
+                    Ok(transport)
+                  }
+                  _ => {
+                    println!("Server handshake invalid!");
+                    let err = io::Error::new(io::ErrorKind::Other, "invalid handshake");
+                    Err(err)
+                  }
+              }
+            });
+            
+           handshake
+        });
+
+
+        Box::new(transport)
     }
-}
 
-impl Service for Client {
-  type Request = String;
-  type Response = String;
-  type Error = io::Error;
-
-    // TODO: boxing Futures, really?
-  type Future = BoxFuture<String, io::Error>;
-
-    fn call(&self, cmd: String) -> Self::Future {
-        self.inner.call(cmd).boxed()
-    }
 }
 
 impl Codec for SbtCodec {
@@ -70,34 +69,5 @@ impl Codec for SbtCodec {
         buf.push(b'\n');
 
         Ok(())
-    }
-}
-
-impl<T: Io + 'static> ClientProto<T> for SbtProto {
-  type Request = String;
-  type Response = String;
-  type Transport = Framed<T, SbtCodec>;
-  type BindTransport = Box<Future<Item = Self::Transport, Error = io::Error>>;
-
-    fn bind_transport(&self, io: T) -> Self::BindTransport {
-        let transport = io.framed(SbtCodec);
-
-        let handshake = transport.into_future()
-            .map_err(|(e,_)| e)
-            .and_then(|(line, transport)| {
-              match line {
-                  Some(ref msg) if msg.contains("ChannelAcceptedEvent") => {
-                    println!("Server accepted our channel");
-                    Ok(transport)
-                  }
-                  _ => {
-                    println!("Server handshake invalid!");
-                    let err = io::Error::new(io::ErrorKind::Other, "invalid handshake");
-                    Err(err)
-                  }
-              }
-            });
-
-        Box::new(handshake)
     }
 }
