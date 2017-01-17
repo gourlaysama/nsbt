@@ -36,7 +36,10 @@ fn main() {
                      .forward(up)
                      .and_then(|(_, _)| Ok(()));
 
-        let print = down.for_each(|line| {
+        let print = down.filter(|e| match e {
+            &nsbt::EventMessage::LogEvent { .. } => true,
+            _ => false,
+        }).for_each(|line| {
                             println!("{}", line);
                             Ok(())
                         })
@@ -56,7 +59,7 @@ fn readline() -> BoxStream<String, ()> {
     thread::spawn(|| {
         let mut editor = Editor::<()>::new();
         loop {
-            let readline = editor.readline(">");
+            let readline = editor.readline("> ");
             match readline {
                 Ok(ref str) if str == ":exit" => {
                     println!("Closing");
