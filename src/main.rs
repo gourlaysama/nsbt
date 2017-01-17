@@ -27,12 +27,17 @@ fn main() {
 
         let fw = readline()
                      .map_err(|_| io::Error::new(io::ErrorKind::Other, "stdin error"))
-                     .map(|s| format!("{{\"type\": \"ExecCommand\", \"commandLine\": \"{}\"}}", s))
+                     .map(|s| {
+                         nsbt::CommandMessage::ExecCommand {
+                             command_line: s,
+                             exec_id: None,
+                         }
+                     })
                      .forward(up)
                      .and_then(|(_, _)| Ok(()));
 
         let print = down.for_each(|line| {
-                            println!("[received] {}", line);
+                            println!("{}", line);
                             Ok(())
                         })
                         .map_err(|_| ());
