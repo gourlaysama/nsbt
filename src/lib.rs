@@ -22,9 +22,7 @@ pub enum CommandMessage {
 }
 
 pub enum EventMessage {
-    ChannelAcceptedEvent {
-        channel_name: String,
-    },
+    ChannelAcceptedEvent { channel_name: String },
     LogEvent {
         level: String,
         message: String,
@@ -47,21 +45,21 @@ impl fmt::Display for EventMessage {
             }
             &EventMessage::LogEvent { ref level, ref message, ref channel_name, ref exec_id } => {
                 write!(f,
-                       "[{}] {} ({})",
+                       "[{}] {} ({}, {})",
                        level,
                        message,
-                       channel_name.clone().unwrap_or("none".to_string()))
+                       channel_name.clone().unwrap_or("none".to_string()),
+                       exec_id.clone().unwrap_or("none".to_string()))
             }
-            &EventMessage::ExecStatusEvent {
-                ref status,
-                ref channel_name,
-                ref exec_id,
-                ref command_queue
-            } => {
+            &EventMessage::ExecStatusEvent { ref status,
+                                             ref channel_name,
+                                             ref exec_id,
+                                             ref command_queue } => {
                 write!(f,
-                       "Server> {} ({})",
+                       "[exec event] {} ({}, {})",
                        status,
-                       channel_name.clone().unwrap_or("none".to_string()))
+                       channel_name.clone().unwrap_or("none".to_string()),
+                       exec_id.clone().unwrap_or("none".to_string()))
             }
         }
     }
@@ -74,23 +72,19 @@ impl Client {
         let transport = TcpStream::connect(addr, &handle).and_then(|socket| {
             let transport = socket.framed(SbtCodec);
 
-            let handshake =
-                transport.into_future()
-                         .map_err(|(e, _)| e)
-                         .and_then(|(msg, transport)| {
-                             match msg {
-                                 Some(EventMessage::ChannelAcceptedEvent { channel_name }) => {
-                                     println!("Server accepted our channel {}", channel_name);
-                                     Ok(transport)
-                                 }
-                                 _ => {
-                                     println!("Server handshake invalid!");
-                                     let err = io::Error::new(io::ErrorKind::Other,
-                                                              "invalid handshake");
-                                     Err(err)
-                                 }
-                             }
-                         });
+            let handshake = transport.into_future()
+                .map_err(|(e, _)| e)
+                .and_then(|(msg, transport)| match msg {
+                    Some(EventMessage::ChannelAcceptedEvent { channel_name }) => {
+                        println!("Server accepted our channel {}", channel_name);
+                        Ok(transport)
+                    }
+                    _ => {
+                        println!("Server handshake invalid!");
+                        let err = io::Error::new(io::ErrorKind::Other, "invalid handshake");
+                        Err(err)
+                    }
+                });
 
             handshake
         });
@@ -102,7 +96,7 @@ impl Client {
 
 impl Codec for SbtCodec {
     type In = EventMessage;
-  type Out = CommandMessage;
+    type Out = CommandMessage;
 
     fn decode(&mut self, buf: &mut EasyBuf) -> Result<Option<EventMessage>, io::Error> {
         if let Some(n) = buf.as_ref().iter().position(|b| *b == b'\n') {
@@ -127,35 +121,40 @@ impl Codec for SbtCodec {
                             Some("ExecStatusEvent") => {
                                 Ok(Some(EventMessage::ExecStatusEvent {
                                     status: js["status"]
-                                                .as_str()
-                                                .expect("missing status")
-                                                .to_string(),
+                                        .as_str()
+                                        .expect("missing status")
+                                        .to_string(),
                                     channel_name: js["channelName"].as_str().map(|s| s.to_string()),
                                     exec_id: js["execId"].as_str().map(|s| s.to_string()),
                                     command_queue: js["commandQueue"]
-                                                       .members()
-                                                       .map(|j| j.as_str().unwrap().to_string())
-                                                       .collect(),
+                                        .members()
+                                        .map(|j| j.as_str().unwrap().to_string())
+                                        .collect(),
                                 }))
                             }
                             Some("ChannelLogEntry") => {
                                 Ok(Some(EventMessage::LogEvent {
                                     level: js["level"].as_str().expect("missing level").to_string(),
                                     message: js["message"]
-                                                 .as_str()
-                                                 .expect("missing message")
-                                                 .to_string(),
+                                        .as_str()
+                                        .expect("missing message")
+                                        .to_string(),
                                     channel_name: js["channelName"].as_str().map(|s| s.to_string()),
                                     exec_id: js["execId"].as_str().map(|s| s.to_string()),
                                 }))
                             }
                             Some("ChannelAcceptedEvent") => {
-                                Ok(Some(EventMessage::ChannelAcceptedEvent {
-                                    channel_name: js["channelName"]
-                                                      .as_str()
-                                                      .expect("missing channel")
-                                                      .to_string(),
-                                }))
+                                match js["channelName"].as_str() {
+                                    Some(channel_name) => {
+                                        Ok(Some(EventMessage::ChannelAcceptedEvent {
+                                            channel_name: channel_name.to_string(),
+                                        }))
+                                    }
+                                    _ => {
+                                        Err(io::Error::new(io::ErrorKind::Other,
+                                                           "channel not found"))
+                                    }
+                                }
                             }
                             _ => Err(io::Error::new(io::ErrorKind::Other, "invalid json")),
                         }

@@ -26,24 +26,25 @@ fn main() {
         let (up, down) = client.split();
 
         let fw = readline()
-                     .map_err(|_| io::Error::new(io::ErrorKind::Other, "stdin error"))
-                     .map(|s| {
-                         nsbt::CommandMessage::ExecCommand {
-                             command_line: s,
-                             exec_id: None,
-                         }
-                     })
-                     .forward(up)
-                     .and_then(|(_, _)| Ok(()));
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "stdin error"))
+            .map(|s| {
+                nsbt::CommandMessage::ExecCommand {
+                    command_line: s,
+                    exec_id: None,
+                }
+            })
+            .forward(up)
+            .and_then(|(_, _)| Ok(()));
 
         let print = down.filter(|e| match e {
-            &nsbt::EventMessage::LogEvent { .. } => true,
-            _ => false,
-        }).for_each(|line| {
-                            println!("{}", line);
-                            Ok(())
-                        })
-                        .map_err(|_| ());
+                &nsbt::EventMessage::LogEvent { .. } => true,
+                _ => false,
+            })
+            .for_each(|line| {
+                println!("{}", line);
+                Ok(())
+            })
+            .map_err(|_| ());
 
         handle2.spawn(print);
 
