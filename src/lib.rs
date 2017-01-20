@@ -1,19 +1,38 @@
 extern crate futures;
 extern crate tokio_core;
+extern crate tokio_proto;
+extern crate tokio_service;
 #[macro_use]
 extern crate json;
 
-use futures::{Future, Stream};
-use tokio_core::io::{Io, Codec, EasyBuf, Framed};
-use tokio_core::net::TcpStream;
-use tokio_core::reactor::Handle;
 use std::{fmt, io, str};
 use std::net::SocketAddr;
 
-pub struct Client;
+use json::JsonValue;
+use futures::{Future, Poll, Stream};
+use tokio_core::io::{Io, Codec, EasyBuf, Framed};
+use tokio_core::reactor::Handle;
+use tokio_proto::streaming::{Body, Message};
+use tokio_proto::streaming::pipeline::{ClientProto, Frame};
+use tokio_proto::TcpClient;
+use tokio_proto::util::client_proxy::ClientProxy;
+use tokio_service::Service;
+//use tokio_proto::streaming::pipeline::{Frame, ClientProto};
 
-pub struct SbtCodec;
+pub struct Client {
+    inner: ClientProxy<Message<CommandMessage, Body<(), io::Error>>,
+                       Message<EventMessage, Body<EventMessage, io::Error>>,
+                       io::Error>,
+}
 
+pub struct SbtCodec {
+    current_exec_id: Option<String>,
+    channel_name: Option<String>,
+}
+
+pub struct SbtProto;
+
+#[derive(Debug)]
 pub enum CommandMessage {
     ExecCommand {
         command_line: String,
@@ -21,6 +40,7 @@ pub enum CommandMessage {
     },
 }
 
+#[derive(Debug)]
 pub enum EventMessage {
     ChannelAcceptedEvent { channel_name: String },
     LogEvent {
@@ -43,75 +63,67 @@ impl fmt::Display for EventMessage {
             &EventMessage::ChannelAcceptedEvent { ref channel_name } => {
                 write!(f, "Bound to channel {}", channel_name)
             }
-            &EventMessage::LogEvent { ref level, ref message, ref channel_name, ref exec_id } => {
-                write!(f,
-                       "[{}] {} ({}, {})",
-                       level,
-                       message,
-                       channel_name.clone().unwrap_or("none".to_string()),
-                       exec_id.clone().unwrap_or("none".to_string()))
+            &EventMessage::LogEvent { ref level, ref message, .. } => {
+                write!(f, "[{}] {}", level, message)
             }
-            &EventMessage::ExecStatusEvent { ref status,
-                                             ref channel_name,
-                                             ref exec_id,
-                                             ref command_queue } => {
-                write!(f,
-                       "[exec event] {} ({}, {})",
-                       status,
-                       channel_name.clone().unwrap_or("none".to_string()),
-                       exec_id.clone().unwrap_or("none".to_string()))
+            &EventMessage::ExecStatusEvent { ref status, ref channel_name, ref exec_id, .. } => {
+                write!(f, "[exec event] {}", status)
             }
         }
     }
 }
 
+pub struct EventStream {
+    inner: Body<EventMessage, io::Error>,
+}
+
+impl Stream for EventStream {
+    type Item = EventMessage;
+    type Error = io::Error;
+
+    fn poll(&mut self) -> Poll<Option<EventMessage>, io::Error> {
+        self.inner.poll()
+    }
+}
+
+impl From<Message<EventMessage, Body<EventMessage, io::Error>>> for EventStream {
+    fn from(src: Message<EventMessage, Body<EventMessage, io::Error>>) -> Self {
+        match src {
+            Message::WithBody(_, body) => EventStream { inner: body },
+            Message::WithoutBody(_) => unimplemented!(),
+        }
+    }
+}
+
+impl From<CommandMessage> for Message<CommandMessage, Body<(), io::Error>> {
+    fn from(src: CommandMessage) -> Self {
+        Message::WithoutBody(src)
+    }
+}
+
 impl Client {
     pub fn connect(addr: &SocketAddr,
-                   handle: Handle)
-                   -> Box<Future<Item = Framed<TcpStream, SbtCodec>, Error = io::Error>> {
-        let transport = TcpStream::connect(addr, &handle).and_then(|socket| {
-            let transport = socket.framed(SbtCodec);
+                   handle: &Handle)
+                   -> Box<Future<Item = Client, Error = io::Error>> {
+        let ret = TcpClient::new(SbtProto)
+            .connect(addr, handle)
+            .map(|client_proxy| Client { inner: client_proxy });
 
-            let handshake = transport.into_future()
-                .map_err(|(e, _)| e)
-                .and_then(|(msg, transport)| match msg {
-                    Some(EventMessage::ChannelAcceptedEvent { channel_name }) => {
-                        println!("Server accepted our channel {}", channel_name);
-                        Ok(transport)
-                    }
-                    _ => {
-                        println!("Server handshake invalid!");
-                        let err = io::Error::new(io::ErrorKind::Other, "invalid handshake");
-                        Err(err)
-                    }
-                });
-
-            handshake
-        });
-
-
-        Box::new(transport)
+        Box::new(ret)
     }
 }
 
 impl Codec for SbtCodec {
-    type In = EventMessage;
-    type Out = CommandMessage;
+    type In = Frame<EventMessage, EventMessage, io::Error>;
+    type Out = Frame<CommandMessage, (), io::Error>;
 
-    fn decode(&mut self, buf: &mut EasyBuf) -> Result<Option<EventMessage>, io::Error> {
+    fn decode(&mut self, buf: &mut EasyBuf) -> Result<Option<Self::In>, io::Error> {
         if let Some(n) = buf.as_ref().iter().position(|b| *b == b'\n') {
             let line = buf.drain_to(n);
 
             buf.drain_to(1);
 
-            let raw = match str::from_utf8(&line.as_ref()) {
-                Ok(s) => s.to_string(),
-                Err(_) => return Err(io::Error::new(io::ErrorKind::Other, "invalid UTF8 string")),
-            };
-
-            // println!("Decoding {}", raw);
-
-            return match json::parse(&raw) {
+            return match to_json(&line.as_ref()) {
                 Err(_) => Err(io::Error::new(io::ErrorKind::Other, "invalid json")),
                 Ok(js) => {
                     if js["type"].is_null() {
@@ -119,35 +131,96 @@ impl Codec for SbtCodec {
                     } else {
                         match js["type"].as_str() {
                             Some("ExecStatusEvent") => {
-                                Ok(Some(EventMessage::ExecStatusEvent {
-                                    status: js["status"]
-                                        .as_str()
-                                        .expect("missing status")
-                                        .to_string(),
-                                    channel_name: js["channelName"].as_str().map(|s| s.to_string()),
-                                    exec_id: js["execId"].as_str().map(|s| s.to_string()),
-                                    command_queue: js["commandQueue"]
-                                        .members()
-                                        .map(|j| j.as_str().unwrap().to_string())
-                                        .collect(),
-                                }))
+                                let channel_name =
+                                    js["channelName"].as_str().map(|s| s.to_string());
+                                let status = js["status"].as_str().expect("missing status");
+                                let exec_id = js["execId"].as_str().map(|s| s.to_string());
+                                if channel_name != self.channel_name {
+                                    Ok(None)
+                                } else {
+                                    match exec_id {
+                                        e @ Some(_) => {
+                                            if self.current_exec_id == e {
+                                                self.current_exec_id = None;
+                                                if status == "Done" {
+                                                    Ok(Some(Frame::Body { chunk: None }))
+                                                } else {
+                                                    Ok(Some(Frame::Body {
+                                                        chunk:
+                                                            Some(EventMessage::ExecStatusEvent {
+                                                            status: status.to_string(),
+                                                            channel_name: channel_name,
+                                                            exec_id: e,
+                                                            command_queue: js["commandQueue"]
+                                                                .members()
+                                                                .map(|j| {
+                                                                    j.as_str().unwrap().to_string()
+                                                                })
+                                                                .collect(),
+                                                        }),
+                                                    }))
+                                                }
+                                            } else if self.current_exec_id.is_none() &&
+                                                      status == "Processing" {
+                                                self.current_exec_id = e.clone();
+                                                Ok(Some(Frame::Message {
+                                                    message: EventMessage::ExecStatusEvent {
+                                                        status: status.to_string(),
+                                                        channel_name: js["channelName"]
+                                                            .as_str()
+                                                            .map(|s| s.to_string()),
+                                                        exec_id: e,
+                                                        command_queue: js["commandQueue"]
+                                                            .members()
+                                                            .map(|j| {
+                                                                j.as_str().unwrap().to_string()
+                                                            })
+                                                            .collect(),
+                                                    },
+                                                    body: true,
+                                                }))
+                                            } else {
+                                                Ok(None)
+                                            }
+                                        }
+                                        None => Ok(None),
+                                    }
+                                }
                             }
                             Some("ChannelLogEntry") => {
-                                Ok(Some(EventMessage::LogEvent {
-                                    level: js["level"].as_str().expect("missing level").to_string(),
+                                let event = EventMessage::LogEvent {
+                                    level: js["level"]
+                                        .as_str()
+                                        .expect("missing level")
+                                        .to_string(),
                                     message: js["message"]
                                         .as_str()
                                         .expect("missing message")
                                         .to_string(),
-                                    channel_name: js["channelName"].as_str().map(|s| s.to_string()),
+                                    channel_name: js["channelName"]
+                                        .as_str()
+                                        .map(|s| s.to_string()),
                                     exec_id: js["execId"].as_str().map(|s| s.to_string()),
-                                }))
+                                };
+
+                                if self.current_exec_id.is_none() {
+                                    Ok(Some(Frame::Message {
+                                        message: event,
+                                        body: false,
+                                    }))
+                                } else {
+                                    Ok(Some(Frame::Body { chunk: Some(event) }))
+                                }
                             }
                             Some("ChannelAcceptedEvent") => {
                                 match js["channelName"].as_str() {
                                     Some(channel_name) => {
-                                        Ok(Some(EventMessage::ChannelAcceptedEvent {
-                                            channel_name: channel_name.to_string(),
+                                        self.channel_name = Some(channel_name.to_string());
+                                        Ok(Some(Frame::Message {
+                                            message: EventMessage::ChannelAcceptedEvent {
+                                                channel_name: channel_name.to_string(),
+                                            },
+                                            body: false,
                                         }))
                                     }
                                     _ => {
@@ -166,18 +239,69 @@ impl Codec for SbtCodec {
         Ok(None)
     }
 
-    fn encode(&mut self, msg: CommandMessage, buf: &mut Vec<u8>) -> io::Result<()> {
-        // buf.extend_from_slice(msg.dump().as_bytes());
+    fn encode(&mut self, msg: Self::Out, buf: &mut Vec<u8>) -> io::Result<()> {
         match msg {
-            CommandMessage::ExecCommand { command_line, exec_id } => {
+            Frame::Message { message: CommandMessage::ExecCommand { command_line, .. },
+                             body: false } => {
                 let msg = object! {
                  "type" => "ExecCommand",
                  "commandLine" => command_line
              };
-                msg.write(buf);
+                msg.write(buf).unwrap();
                 buf.push(b'\n');
                 Ok(())
             }
+            _ => Err(io::Error::new(io::ErrorKind::Other, "no streaming allowed for requests")),
         }
+    }
+}
+
+impl<T: Io + 'static> ClientProto<T> for SbtProto {
+    type Request = CommandMessage;
+    type RequestBody = ();
+    type Response = EventMessage;
+    type ResponseBody = EventMessage;
+    type Error = io::Error;
+
+    type Transport = Framed<T, SbtCodec>;
+    type BindTransport = Box<Future<Item = Self::Transport, Error = Self::Error>>;
+
+    fn bind_transport(&self, io: T) -> Self::BindTransport {
+        let transport = io.framed(SbtCodec {
+            current_exec_id: None,
+            channel_name: None,
+        });
+
+        let handshake = transport.into_future()
+            .map_err(|(e, _)| e)
+            .and_then(|(msg, transport)| match msg {
+                Some(Frame::Message { message: EventMessage::ChannelAcceptedEvent { .. },
+                                      body: false }) => Ok(transport),
+                _ => Err(io::Error::new(io::ErrorKind::Other, "invalid handshake")),
+            });
+
+        Box::new(handshake)
+    }
+}
+
+fn to_json(buf: &[u8]) -> Result<JsonValue, io::Error> {
+    let raw = match str::from_utf8(buf) {
+        Ok(s) => Ok(s.to_string()),
+        Err(_) => Err(io::Error::new(io::ErrorKind::Other, "invalid UTF8 string")),
+    };
+
+    raw.and_then(|s| {
+        json::parse(&s).map_err(|_| io::Error::new(io::ErrorKind::Other, "invalid json"))
+    })
+}
+
+impl Service for Client {
+    type Request = CommandMessage;
+    type Response = EventStream;
+    type Error = io::Error;
+    type Future = Box<Future<Item = EventStream, Error = io::Error>>;
+
+    fn call(&self, req: CommandMessage) -> Self::Future {
+        Box::new(self.inner.call(req.into()).map(EventStream::from))
     }
 }
