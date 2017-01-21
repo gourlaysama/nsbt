@@ -13,6 +13,7 @@ use futures::{BoxFuture, Future, Stream};
 use futures::sync::oneshot;
 use nsbt::Client;
 use rustyline::Editor;
+use rustyline::error::ReadlineError;
 use tokio_core::reactor::Core;
 use tokio_service::Service;
 
@@ -24,13 +25,13 @@ fn main() {
 
     let addr = "127.0.0.1:5369".parse().unwrap();
 
-    core.run(Client::connect(&addr, &handle)
-            .and_then(|client| {
-                println!("Connected to sbt server at '{}'", &addr);
-                println!("Run ':exit' to close the shell.");
-                let client = Rc::new(client);
-                futures::stream::repeat(client).for_each(|c| {
-                    let input = readline2()
+    let evt_loop = core.run(Client::connect(&addr, &handle)
+        .and_then(|client| {
+            println!("Connected to sbt server at '{}'", &addr);
+            println!("Run ':exit' to close the shell.");
+            let client = Rc::new(client);
+            futures::stream::repeat(client).for_each(|c| {
+                let input = readline2()
                     // .map_err(|_| ())
                     .then(|f| match f {
                         Ok(Some(s)) => Ok(s),
@@ -55,16 +56,23 @@ fn main() {
                             // .map_err(|_| ())
                     });
 
-                    input
-                })
+                input
             })
-            .then(|o| match o {
-                Ok(a) => Ok(a),
-                Err(ref e) if e.description() == "Closing" => Ok(()),
-                Err(e) => Err(e),
+        })
+        .then(|o| match o {
+            Ok(a) => Ok(a),
+            Err(ref e) if e.description() == "Closing" => Ok(()),
+            Err(e) => Err(e),
 
-            }))
-        .unwrap()
+        }));
+
+    match evt_loop {
+        Err(e) => {
+            println!("Error: {}", e);
+            std::process::exit(-1);
+        }
+        Ok(_) => (),
+    }
 }
 
 fn readline2() -> BoxFuture<Option<String>, futures::Canceled> {
@@ -80,6 +88,10 @@ fn readline2() -> BoxFuture<Option<String>, futures::Canceled> {
             }
             Ok(line) => {
                 tx.complete(Some(line));
+            }
+            Err(ReadlineError::Eof) |
+            Err(ReadlineError::Interrupted) => {
+                tx.complete(None);
             }
             Err(err) => {
                 println!("Error: {:?}", err);

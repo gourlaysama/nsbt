@@ -66,7 +66,7 @@ impl fmt::Display for EventMessage {
             &EventMessage::LogEvent { ref level, ref message, .. } => {
                 write!(f, "[{}] {}", level, message)
             }
-            &EventMessage::ExecStatusEvent { ref status, ref channel_name, ref exec_id, .. } => {
+            &EventMessage::ExecStatusEvent { ref status, .. } => {
                 write!(f, "[exec event] {}", status)
             }
         }
@@ -302,6 +302,13 @@ impl Service for Client {
     type Future = Box<Future<Item = EventStream, Error = io::Error>>;
 
     fn call(&self, req: CommandMessage) -> Self::Future {
-        Box::new(self.inner.call(req.into()).map(EventStream::from))
+        let into = self.inner
+            .call(req.into())
+            .map_err(|e| {
+                io::Error::new(io::ErrorKind::Other,
+                               format!("Unable to send command ({})", e))
+            });
+
+        Box::new(into.map(EventStream::from))
     }
 }
