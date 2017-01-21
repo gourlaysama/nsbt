@@ -140,11 +140,29 @@ impl Codec for SbtCodec {
                                 } else {
                                     match exec_id {
                                         e @ Some(_) => {
-                                            if self.current_exec_id == e {
-                                                self.current_exec_id = None;
+                                            if status == "Processing" {
+                                                self.current_exec_id = e.clone();
+                                                Ok(Some(Frame::Message {
+                                                   message: EventMessage::ExecStatusEvent {
+                                                       status: status.to_string(),
+                                                       channel_name: js["channelName"]
+                                                           .as_str()
+                                                           .map(|s| s.to_string()),
+                                                       exec_id: e,
+                                                       command_queue: js["commandQueue"]
+                                                           .members()
+                                                           .map(|j| {
+                                                               j.as_str().unwrap().to_string()
+                                                           })
+                                                           .collect(),
+                                                   },
+                                                   body: true,
+                                               }))
+                                            } else if self.current_exec_id == e {
                                                 if status == "Done" {
                                                     Ok(Some(Frame::Body { chunk: None }))
                                                 } else {
+                                                    self.current_exec_id = None;
                                                     Ok(Some(Frame::Body {
                                                         chunk:
                                                             Some(EventMessage::ExecStatusEvent {
@@ -160,25 +178,6 @@ impl Codec for SbtCodec {
                                                         }),
                                                     }))
                                                 }
-                                            } else if self.current_exec_id.is_none() &&
-                                                      status == "Processing" {
-                                                self.current_exec_id = e.clone();
-                                                Ok(Some(Frame::Message {
-                                                    message: EventMessage::ExecStatusEvent {
-                                                        status: status.to_string(),
-                                                        channel_name: js["channelName"]
-                                                            .as_str()
-                                                            .map(|s| s.to_string()),
-                                                        exec_id: e,
-                                                        command_queue: js["commandQueue"]
-                                                            .members()
-                                                            .map(|j| {
-                                                                j.as_str().unwrap().to_string()
-                                                            })
-                                                            .collect(),
-                                                    },
-                                                    body: true,
-                                                }))
                                             } else {
                                                 Ok(None)
                                             }
@@ -241,12 +240,16 @@ impl Codec for SbtCodec {
 
     fn encode(&mut self, msg: Self::Out, buf: &mut Vec<u8>) -> io::Result<()> {
         match msg {
-            Frame::Message { message: CommandMessage::ExecCommand { command_line, .. },
+            Frame::Message { message: CommandMessage::ExecCommand { command_line, exec_id },
                              body: false } => {
-                let msg = object! {
+                let mut msg = object! {
                  "type" => "ExecCommand",
                  "commandLine" => command_line
-             };
+                };
+                if let Some(e) = exec_id {
+                    msg["execId"] = e.as_str().into();
+                    self.current_exec_id = Some(e);
+                }
                 msg.write(buf).unwrap();
                 buf.push(b'\n');
                 Ok(())

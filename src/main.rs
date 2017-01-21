@@ -4,6 +4,7 @@ extern crate futures;
 extern crate tokio_core;
 extern crate tokio_service;
 extern crate rustyline;
+extern crate rand;
 
 use std::error::Error;
 use std::rc::Rc;
@@ -44,7 +45,7 @@ fn main() {
                     .and_then(move |s| {
                         let response = c.call(nsbt::CommandMessage::ExecCommand {
                             command_line: s,
-                            exec_id: None,
+                            exec_id: Some(format!("nsbt-exec-{}", rand::random::<u32>())),
                         });
 
                         response.and_then(|s| {
