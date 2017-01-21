@@ -17,7 +17,6 @@ use tokio_proto::streaming::pipeline::{ClientProto, Frame};
 use tokio_proto::TcpClient;
 use tokio_proto::util::client_proxy::ClientProxy;
 use tokio_service::Service;
-//use tokio_proto::streaming::pipeline::{Frame, ClientProto};
 
 pub struct Client {
     inner: ClientProxy<Message<CommandMessage, Body<(), io::Error>>,
@@ -97,6 +96,8 @@ impl From<Message<EventMessage, Body<EventMessage, io::Error>>> for EventStream 
 
 impl From<CommandMessage> for Message<CommandMessage, Body<(), io::Error>> {
     fn from(src: CommandMessage) -> Self {
+        // there is no streaming of anything to the server
+        // all commands are without bodies
         Message::WithoutBody(src)
     }
 }
@@ -123,7 +124,7 @@ impl Codec for SbtCodec {
 
             buf.drain_to(1);
 
-            return match to_json(&line.as_ref()) {
+            return match parse_json(&line.as_ref()) {
                 Err(_) => Err(io::Error::new(io::ErrorKind::Other, "invalid json")),
                 Ok(js) => {
                     if js["type"].is_null() {
@@ -136,11 +137,15 @@ impl Codec for SbtCodec {
                                 let status = js["status"].as_str().expect("missing status");
                                 let exec_id = js["execId"].as_str().map(|s| s.to_string());
                                 if channel_name != self.channel_name {
+                                    // wrong channel, what is this message even doing here?
+                                    // let's just ignore it
                                     Ok(None)
                                 } else {
                                     match exec_id {
                                         e @ Some(_) => {
                                             if status == "Processing" {
+                                                // we receive a Processing, this means the start
+                                                // of a new response from sbt
                                                 self.current_exec_id = e.clone();
                                                 Ok(Some(Frame::Message {
                                                    message: EventMessage::ExecStatusEvent {
@@ -160,9 +165,12 @@ impl Codec for SbtCodec {
                                                }))
                                             } else if self.current_exec_id == e {
                                                 if status == "Done" {
+                                                    // end of the server response
+                                                    self.current_exec_id = None;
                                                     Ok(Some(Frame::Body { chunk: None }))
                                                 } else {
-                                                    self.current_exec_id = None;
+                                                    // some unknown status event, let's just move
+                                                    // it along, it doesn't terminate the response
                                                     Ok(Some(Frame::Body {
                                                         chunk:
                                                             Some(EventMessage::ExecStatusEvent {
@@ -187,28 +195,43 @@ impl Codec for SbtCodec {
                                 }
                             }
                             Some("ChannelLogEntry") => {
-                                let event = EventMessage::LogEvent {
-                                    level: js["level"]
-                                        .as_str()
-                                        .expect("missing level")
-                                        .to_string(),
-                                    message: js["message"]
-                                        .as_str()
-                                        .expect("missing message")
-                                        .to_string(),
-                                    channel_name: js["channelName"]
-                                        .as_str()
-                                        .map(|s| s.to_string()),
-                                    exec_id: js["execId"].as_str().map(|s| s.to_string()),
-                                };
+                                // some log event
+                                let channel_name =
+                                    js["channelName"].as_str().map(|s| s.to_string());
+                                let exec_id = js["execId"].as_str().map(|s| s.to_string());
 
-                                if self.current_exec_id.is_none() {
-                                    Ok(Some(Frame::Message {
-                                        message: event,
-                                        body: false,
-                                    }))
+                                if channel_name != self.channel_name {
+                                    // a log entry that doesn't belong to our channel
+                                    // let's ignore it
+                                    Ok(None)
                                 } else {
-                                    Ok(Some(Frame::Body { chunk: Some(event) }))
+                                    let event = EventMessage::LogEvent {
+                                        level: js["level"]
+                                            .as_str()
+                                            .expect("missing level")
+                                            .to_string(),
+                                        message: js["message"]
+                                            .as_str()
+                                            .unwrap_or("")
+                                            .to_string(),
+                                        channel_name: channel_name,
+                                        exec_id: exec_id.clone(),
+                                    };
+
+                                    if self.current_exec_id.is_none() {
+                                        // a log entry that isn't associated with the current
+                                        // response, but is from us? Souldn't happen, but...
+                                        Ok(Some(Frame::Message {
+                                            message: event,
+                                            body: false,
+                                        }))
+                                    } else if self.current_exec_id == exec_id {
+                                        Ok(Some(Frame::Body { chunk: Some(event) }))
+                                    } else {
+                                        // a log entry for us but from the wrong request?
+                                        // let's ignore it
+                                        Ok(None)
+                                    }
                                 }
                             }
                             Some("ChannelAcceptedEvent") => {
@@ -287,7 +310,7 @@ impl<T: Io + 'static> ClientProto<T> for SbtProto {
     }
 }
 
-fn to_json(buf: &[u8]) -> Result<JsonValue, io::Error> {
+fn parse_json(buf: &[u8]) -> Result<JsonValue, io::Error> {
     let raw = match str::from_utf8(buf) {
         Ok(s) => Ok(s.to_string()),
         Err(_) => Err(io::Error::new(io::ErrorKind::Other, "invalid UTF8 string")),

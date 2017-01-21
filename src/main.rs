@@ -33,11 +33,12 @@ fn main() {
             let client = Rc::new(client);
             futures::stream::repeat(client).for_each(|c| {
                 let input = readline2()
-                    // .map_err(|_| ())
                     .then(|f| match f {
                         Ok(Some(s)) => Ok(s),
                         Ok(None) => {
                             println!("Closing client shell.");
+                            // we use an error to break out of the infinite stream above
+                            // TODO: use something better than io::Error everywhere
                             Err(io::Error::new(io::ErrorKind::Other, "Closing"))
                         }
                         Err(_) => Err(io::Error::new(io::ErrorKind::Other, "Readline error")),
@@ -49,19 +50,20 @@ fn main() {
                         });
 
                         response.and_then(|s| {
-                                s.for_each(|event| {
-                                    println!("{}", event);
-                                    Ok(())
-                                })
+                            s.for_each(|event| {
+                                println!("{}", event);
+                                Ok(())
                             })
-                            // .map_err(|_| ())
+                        })
                     });
 
                 input
             })
         })
         .then(|o| match o {
+            // the stream above is infinite so this never happens
             Ok(a) => Ok(a),
+            // we transform a "Closing" error into a graceful exit from the event loop
             Err(ref e) if e.description() == "Closing" => Ok(()),
             Err(e) => Err(e),
 
