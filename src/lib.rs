@@ -5,11 +5,14 @@ extern crate tokio_service;
 #[macro_use]
 extern crate json;
 
-use std::{fmt, io, str};
+pub mod messages;
+
+use std::{io, str};
 use std::net::SocketAddr;
 
 use json::JsonValue;
 use futures::{Future, Poll, Stream};
+use messages::*;
 use tokio_core::io::{Io, Codec, EasyBuf, Framed};
 use tokio_core::reactor::Handle;
 use tokio_proto::streaming::{Body, Message};
@@ -30,47 +33,6 @@ pub struct SbtCodec {
 }
 
 pub struct SbtProto;
-
-#[derive(Debug)]
-pub enum CommandMessage {
-    ExecCommand {
-        command_line: String,
-        exec_id: Option<String>,
-    },
-}
-
-#[derive(Debug)]
-pub enum EventMessage {
-    ChannelAcceptedEvent { channel_name: String },
-    LogEvent {
-        level: String,
-        message: String,
-        channel_name: Option<String>,
-        exec_id: Option<String>,
-    },
-    ExecStatusEvent {
-        status: String,
-        channel_name: Option<String>,
-        exec_id: Option<String>,
-        command_queue: Vec<String>,
-    },
-}
-
-impl fmt::Display for EventMessage {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            &EventMessage::ChannelAcceptedEvent { ref channel_name } => {
-                write!(f, "Bound to channel {}", channel_name)
-            }
-            &EventMessage::LogEvent { ref level, ref message, .. } => {
-                write!(f, "[{}] {}", level, message)
-            }
-            &EventMessage::ExecStatusEvent { ref status, .. } => {
-                write!(f, "[exec event] {}", status)
-            }
-        }
-    }
-}
 
 pub struct EventStream {
     inner: Body<EventMessage, io::Error>,

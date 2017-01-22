@@ -12,7 +12,7 @@ use std::{io, thread};
 
 use futures::{BoxFuture, Future, Stream};
 use futures::sync::oneshot;
-use nsbt::Client;
+use nsbt::{Client, messages};
 use rustyline::Editor;
 use rustyline::error::ReadlineError;
 use tokio_core::reactor::Core;
@@ -44,7 +44,7 @@ fn main() {
                         Err(_) => Err(io::Error::new(io::ErrorKind::Other, "Readline error")),
                     })
                     .and_then(move |s| {
-                        let response = c.call(nsbt::CommandMessage::ExecCommand {
+                        let response = c.call(messages::CommandMessage::ExecCommand {
                             command_line: s,
                             exec_id: Some(format!("nsbt-exec-{}", rand::random::<u32>())),
                         });
