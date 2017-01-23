@@ -1,15 +1,18 @@
-extern crate nsbt;
-
+#[macro_use]
+extern crate clap;
 extern crate futures;
+extern crate nsbt;
+extern crate rand;
+extern crate rustyline;
 extern crate tokio_core;
 extern crate tokio_service;
-extern crate rustyline;
-extern crate rand;
 
+use std::cell::RefCell;
 use std::error::Error;
 use std::rc::Rc;
 use std::{io, thread};
 
+use clap::{Arg, App};
 use futures::{BoxFuture, Future, Stream};
 use futures::sync::oneshot;
 use nsbt::{Client, messages};
@@ -20,23 +23,74 @@ use tokio_service::Service;
 
 
 fn main() {
+    let matches = App::new("nsbt")
+        .help_short("H")
+        .version(crate_version!())
+        .author(crate_authors!())
+        .about("Connects to a running sbt server to send commands to it")
+        .arg(Arg::with_name("host")
+            .short("h")
+            .long("host")
+            .help("Host to connect to")
+            .takes_value(true)
+            .default_value("127.0.0.1"))
+        .arg(Arg::with_name("port")
+            .short("p")
+            .long("port")
+            .help("Port to connect to")
+            .takes_value(true)
+            .default_value("5369"))
+        .arg(Arg::with_name("commands")
+            .multiple(true)
+            .index(1)
+            .value_name("COMMANDS")
+            .help("Some commands to run once connected to the sbt server.
+If no command is specified, an interactive shell is displayed."))
+        .get_matches();
 
     let mut core = Core::new().unwrap();
     let handle = core.handle();
 
-    let addr = "127.0.0.1:5369".parse().unwrap();
+    let addr = format!("{}:{}",
+                       matches.value_of("host").unwrap(),
+                       matches.value_of("port").unwrap())
+        .parse()
+        .unwrap();
+
+    let commands = matches.values_of_lossy("commands");
+    let go_to_shell = match commands {
+        None => true,
+        Some(ref c) => c.iter().any(|s| s == ":shell"),
+    };
+    let commands = commands.map(|c| c.into_iter());
+    let rcmds = commands.map(|c| Rc::new(RefCell::new(c)));
+    //let b_commands = commands.map(|c| c.as_ref());
 
     let evt_loop = core.run(Client::connect(&addr, &handle)
         .and_then(|client| {
-            println!("Connected to sbt server at '{}'", &addr);
-            println!("Run ':exit' to close the shell.");
+            println!("[client] Connected to sbt server at '{}'", &addr);
+            if go_to_shell {
+                println!("[client] Run ':exit' to close the shell.");
+            }
             let client = Rc::new(client);
-            futures::stream::repeat(client).for_each(|c| {
-                let input = readline2()
+            futures::stream::repeat((client, rcmds)).for_each(|(cl, cds)| {
+                let next_command = futures::future::result(cds.ok_or(futures::Canceled)
+                        .and_then(|c| c.borrow_mut().next().ok_or(futures::Canceled)))
+                    .then(|e| match e {
+                        Ok(ref s) if s == ":shell" => Err(futures::Canceled),
+                        Ok(a) => Ok(Some(a)),
+                        Err(a) => Err(a),
+                    });
+
+                let input = next_command.or_else(|_| if go_to_shell {
+                        readline2()
+                    } else {
+                        futures::future::empty().boxed()
+                    })
                     .then(|f| match f {
                         Ok(Some(s)) => Ok(s),
                         Ok(None) => {
-                            println!("Closing client shell.");
+                            println!("[client] Closing shell.");
                             // we use an error to break out of the infinite stream above
                             // TODO: use something better than io::Error everywhere
                             Err(io::Error::new(io::ErrorKind::Other, "Closing"))
@@ -44,7 +98,7 @@ fn main() {
                         Err(_) => Err(io::Error::new(io::ErrorKind::Other, "Readline error")),
                     })
                     .and_then(move |s| {
-                        let response = c.call(messages::CommandMessage::ExecCommand {
+                        let response = cl.call(messages::CommandMessage::ExecCommand {
                             command_line: s,
                             exec_id: Some(format!("nsbt-exec-{}", rand::random::<u32>())),
                         });
@@ -71,7 +125,7 @@ fn main() {
 
     match evt_loop {
         Err(e) => {
-            println!("Error: {}", e);
+            println!("[client] Error: {}", e);
             std::process::exit(-1);
         }
         Ok(_) => (),
