@@ -1,4 +1,4 @@
-# nsbt: a fast client to send commands to an sbt 1.0.x server
+# nsbt: a fast client for sbt 1.0.x server
 
 **nsbt** is a native command line client for the new sbt 1.0.x server.
 
@@ -44,7 +44,7 @@ somewhere in your `$PATH`.
 
 1. Run `sbt` in your project's directory and then the new `server` command.
 
-   This requires a version of sbt 1.0.x that contains [8c9dfda][3] (any SNAPSHOT
+   This requires a version of sbt 1.0.x that contains [`8c9dfda`][3] (any SNAPSHOT
    of 1.0.0 published after 2017-01-16).
 
 2. From anywhere, run `nsbt <command>...` to submit commands to it,
