@@ -24,12 +24,11 @@ use tokio_service::Service;
 
 fn main() {
     let matches = App::new("nsbt")
-        .help_short("H")
         .version(crate_version!())
         .author(crate_authors!())
         .about("Connects to a running sbt server to send commands to it")
         .arg(Arg::with_name("host")
-            .short("h")
+            .short("H")
             .long("host")
             .help("Host to connect to")
             .takes_value(true)
