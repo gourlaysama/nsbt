@@ -8,20 +8,29 @@ pub enum CommandMessage {
     },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Deserialize, Clone)]
+#[serde(tag = "type")]
 pub enum EventMessage {
-    ChannelAcceptedEvent { channel_name: String },
-    LogEvent {
+    ChannelAcceptedEvent {
+        #[serde(rename = "channelName")]
+        channel_name: String,
+    },
+    StringEvent {
         level: String,
         message: String,
+        #[serde(rename = "channelName")]
         channel_name: Option<String>,
+        #[serde(rename = "execId")]
         exec_id: Option<String>,
     },
     ExecStatusEvent {
         status: String,
+        #[serde(rename = "channelName")]
         channel_name: Option<String>,
+        #[serde(rename = "execId")]
         exec_id: Option<String>,
-        command_queue: Vec<String>,
+        #[serde(rename = "commandQueue")]
+        command_queue: Option<Vec<String>>,
     },
 }
 
@@ -31,9 +40,11 @@ impl fmt::Display for EventMessage {
             &EventMessage::ChannelAcceptedEvent { ref channel_name } => {
                 write!(f, "Bound to channel {}", channel_name)
             }
-            &EventMessage::LogEvent { ref level, ref message, .. } => {
-                write!(f, "[{}] {}", level, message)
-            }
+            &EventMessage::StringEvent {
+                ref level,
+                ref message,
+                ..
+            } => write!(f, "[{}] {}", level, message),
             &EventMessage::ExecStatusEvent { ref status, .. } => {
                 write!(f, "[exec event] {}", status)
             }

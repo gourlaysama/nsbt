@@ -1,20 +1,29 @@
+extern crate bytes;
 extern crate futures;
-extern crate tokio_core;
-extern crate tokio_proto;
-extern crate tokio_service;
 #[macro_use]
 extern crate json;
+#[macro_use]
+extern crate log;
+#[macro_use]
+extern crate serde_derive;
+extern crate serde_json;
+extern crate tokio_core;
+extern crate tokio_io;
+extern crate tokio_proto;
+extern crate tokio_service;
 
 pub mod messages;
 
-use std::{io, str};
+use std::io;
 use std::net::SocketAddr;
 
-use json::JsonValue;
+use bytes::{BufMut, BytesMut};
 use futures::{Future, Poll, Stream};
 use messages::*;
-use tokio_core::io::{Io, Codec, EasyBuf, Framed};
+//use tokio_core::io::{Io, Codec, EasyBuf, Framed};
 use tokio_core::reactor::Handle;
+use tokio_io::{AsyncRead, AsyncWrite};
+use tokio_io::codec::{Decoder, Encoder, Framed};
 use tokio_proto::streaming::{Body, Message};
 use tokio_proto::streaming::pipeline::{ClientProto, Frame};
 use tokio_proto::TcpClient;
@@ -22,9 +31,11 @@ use tokio_proto::util::client_proxy::ClientProxy;
 use tokio_service::Service;
 
 pub struct Client {
-    inner: ClientProxy<Message<CommandMessage, Body<(), io::Error>>,
-                       Message<EventMessage, Body<EventMessage, io::Error>>,
-                       io::Error>,
+    inner: ClientProxy<
+        Message<CommandMessage, Body<(), io::Error>>,
+        Message<EventMessage, Body<EventMessage, io::Error>>,
+        io::Error,
+    >,
 }
 
 pub struct SbtCodec {
@@ -65,155 +76,114 @@ impl From<CommandMessage> for Message<CommandMessage, Body<(), io::Error>> {
 }
 
 impl Client {
-    pub fn connect(addr: &SocketAddr,
-                   handle: &Handle)
-                   -> Box<Future<Item = Client, Error = io::Error>> {
+    pub fn connect(
+        addr: &SocketAddr,
+        handle: &Handle,
+    ) -> Box<Future<Item = Client, Error = io::Error>> {
         let ret = TcpClient::new(SbtProto)
             .connect(addr, handle)
-            .map(|client_proxy| Client { inner: client_proxy });
+            .map(|client_proxy| Client {
+                inner: client_proxy,
+            });
 
         Box::new(ret)
     }
 }
 
-impl Codec for SbtCodec {
-    type In = Frame<EventMessage, EventMessage, io::Error>;
-    type Out = Frame<CommandMessage, (), io::Error>;
+impl Decoder for SbtCodec {
+    // type In = Frame<EventMessage, EventMessage, io::Error>;
+    // type Out = Frame<CommandMessage, (), io::Error>;
+    type Item = Frame<EventMessage, EventMessage, io::Error>;
+    type Error = io::Error;
 
-    fn decode(&mut self, buf: &mut EasyBuf) -> Result<Option<Self::In>, io::Error> {
+    fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Self::Item>, io::Error> {
         if let Some(n) = buf.as_ref().iter().position(|b| *b == b'\n') {
-            let line = buf.drain_to(n);
+            let line = buf.split_to(n);
 
-            buf.drain_to(1);
+            buf.split_to(1);
 
-            return match parse_json(&line.as_ref()) {
-                Err(_) => Err(io::Error::new(io::ErrorKind::Other, "invalid json")),
-                Ok(js) => {
-                    if js["type"].is_null() {
-                        Err(io::Error::new(io::ErrorKind::Other, "invalid json"))
-                    } else {
-                        match js["type"].as_str() {
-                            Some("ExecStatusEvent") => {
-                                let channel_name =
-                                    js["channelName"].as_str().map(|s| s.to_string());
-                                let status = js["status"].as_str().expect("missing status");
-                                let exec_id = js["execId"].as_str().map(|s| s.to_string());
-                                if channel_name != self.channel_name {
-                                    // wrong channel, what is this message even doing here?
-                                    // let's just ignore it
-                                    Ok(None)
-                                } else {
-                                    match exec_id {
-                                        e @ Some(_) => {
-                                            if status == "Processing" {
-                                                // we receive a Processing, this means the start
-                                                // of a new response from sbt
-                                                self.current_exec_id = e.clone();
-                                                Ok(Some(Frame::Message {
-                                                   message: EventMessage::ExecStatusEvent {
-                                                       status: status.to_string(),
-                                                       channel_name: js["channelName"]
-                                                           .as_str()
-                                                           .map(|s| s.to_string()),
-                                                       exec_id: e,
-                                                       command_queue: js["commandQueue"]
-                                                           .members()
-                                                           .map(|j| {
-                                                               j.as_str().unwrap().to_string()
-                                                           })
-                                                           .collect(),
-                                                   },
-                                                   body: true,
-                                               }))
-                                            } else if self.current_exec_id == e {
-                                                if status == "Done" {
-                                                    // end of the server response
-                                                    self.current_exec_id = None;
-                                                    Ok(Some(Frame::Body { chunk: None }))
-                                                } else {
-                                                    // some unknown status event, let's just move
-                                                    // it along, it doesn't terminate the response
-                                                    Ok(Some(Frame::Body {
-                                                        chunk:
-                                                            Some(EventMessage::ExecStatusEvent {
-                                                            status: status.to_string(),
-                                                            channel_name: channel_name,
-                                                            exec_id: e,
-                                                            command_queue: js["commandQueue"]
-                                                                .members()
-                                                                .map(|j| {
-                                                                    j.as_str().unwrap().to_string()
-                                                                })
-                                                                .collect(),
-                                                        }),
-                                                    }))
-                                                }
+            return match serde_json::from_slice::<EventMessage>(&line.as_ref()) {
+                Err(_) => {
+                    debug!("Received wrong message:");
+                    debug!("{:?}", line);
+                    Err(io::Error::new(io::ErrorKind::Other, "invalid json"))
+                }
+                Ok(ev) => {
+                    match ev {
+                        EventMessage::ExecStatusEvent {
+                            ref status,
+                            ref channel_name,
+                            ref exec_id,
+                            ..
+                        } => {
+                            // TODO: those 'clone' shouldn't be necessary
+                            let ev = ev.clone();
+                            if self.channel_name != *channel_name {
+                                Ok(None)
+                            } else {
+                                match exec_id {
+                                    e @ &Some(_) => {
+                                        if status == "Processing" {
+                                            // we receive a Processing, this means the start
+                                            // of a new response from sbt
+                                            self.current_exec_id = e.clone();
+                                            Ok(Some(Frame::Message {
+                                                message: ev,
+                                                body: true,
+                                            }))
+                                        } else if self.current_exec_id == *e {
+                                            if status == "Done" {
+                                                // end of the server response
+                                                self.current_exec_id = None;
+                                                Ok(Some(Frame::Body { chunk: None }))
                                             } else {
-                                                Ok(None)
+                                                // some unknown status event, let's just move
+                                                // it along, it doesn't terminate the response
+                                                Ok(Some(Frame::Body { chunk: Some(ev) }))
                                             }
+                                        } else {
+                                            Ok(None)
                                         }
-                                        None => Ok(None),
                                     }
+                                    &None => Ok(None),
                                 }
                             }
-                            Some("ChannelLogEntry") => {
-                                // some log event
-                                let channel_name =
-                                    js["channelName"].as_str().map(|s| s.to_string());
-                                let exec_id = js["execId"].as_str().map(|s| s.to_string());
-
-                                if channel_name != self.channel_name {
-                                    // a log entry that doesn't belong to our channel
+                        }
+                        EventMessage::StringEvent {
+                            ref channel_name,
+                            ref exec_id,
+                            ..
+                        } => {
+                            let ev = ev.clone();
+                            if *channel_name != self.channel_name {
+                                // a log entry that doesn't belong to our channel
+                                // let's ignore it
+                                debug!("Received unknown log entry: {:?}", ev);
+                                Ok(None)
+                            } else {
+                                if self.current_exec_id.is_none() {
+                                    // a log entry that isn't associated with the current
+                                    // response, but is from us? Souldn't happen, but...
+                                    Ok(Some(Frame::Message {
+                                        message: ev,
+                                        body: false,
+                                    }))
+                                } else if self.current_exec_id == *exec_id {
+                                    Ok(Some(Frame::Body { chunk: Some(ev) }))
+                                } else {
+                                    // a log entry for us but from the wrong request?
                                     // let's ignore it
                                     Ok(None)
-                                } else {
-                                    let event = EventMessage::LogEvent {
-                                        level: js["level"]
-                                            .as_str()
-                                            .expect("missing level")
-                                            .to_string(),
-                                        message: js["message"]
-                                            .as_str()
-                                            .unwrap_or("")
-                                            .to_string(),
-                                        channel_name: channel_name,
-                                        exec_id: exec_id.clone(),
-                                    };
-
-                                    if self.current_exec_id.is_none() {
-                                        // a log entry that isn't associated with the current
-                                        // response, but is from us? Souldn't happen, but...
-                                        Ok(Some(Frame::Message {
-                                            message: event,
-                                            body: false,
-                                        }))
-                                    } else if self.current_exec_id == exec_id {
-                                        Ok(Some(Frame::Body { chunk: Some(event) }))
-                                    } else {
-                                        // a log entry for us but from the wrong request?
-                                        // let's ignore it
-                                        Ok(None)
-                                    }
                                 }
                             }
-                            Some("ChannelAcceptedEvent") => {
-                                match js["channelName"].as_str() {
-                                    Some(channel_name) => {
-                                        self.channel_name = Some(channel_name.to_string());
-                                        Ok(Some(Frame::Message {
-                                            message: EventMessage::ChannelAcceptedEvent {
-                                                channel_name: channel_name.to_string(),
-                                            },
-                                            body: false,
-                                        }))
-                                    }
-                                    _ => {
-                                        Err(io::Error::new(io::ErrorKind::Other,
-                                                           "channel not found"))
-                                    }
-                                }
-                            }
-                            _ => Err(io::Error::new(io::ErrorKind::Other, "invalid json")),
+                        }
+                        EventMessage::ChannelAcceptedEvent { ref channel_name } => {
+                            let ev = ev.clone();
+                            self.channel_name = Some(channel_name.clone());
+                            Ok(Some(Frame::Message {
+                                message: ev,
+                                body: false,
+                            }))
                         }
                     }
                 }
@@ -222,11 +192,21 @@ impl Codec for SbtCodec {
 
         Ok(None)
     }
+}
+impl Encoder for SbtCodec {
+    type Item = Frame<CommandMessage, (), io::Error>;
+    type Error = io::Error;
 
-    fn encode(&mut self, msg: Self::Out, buf: &mut Vec<u8>) -> io::Result<()> {
+    fn encode(&mut self, msg: Self::Item, buf: &mut BytesMut) -> io::Result<()> {
         match msg {
-            Frame::Message { message: CommandMessage::ExecCommand { command_line, exec_id },
-                             body: false } => {
+            Frame::Message {
+                message:
+                    CommandMessage::ExecCommand {
+                        command_line,
+                        exec_id,
+                    },
+                body: false,
+            } => {
                 let mut msg = object! {
                  "type" => "ExecCommand",
                  "commandLine" => command_line
@@ -235,16 +215,20 @@ impl Codec for SbtCodec {
                     msg["execId"] = e.as_str().into();
                     self.current_exec_id = Some(e);
                 }
-                msg.write(buf).unwrap();
-                buf.push(b'\n');
+                //msg.write(buf).unwrap();
+                buf.put(msg.dump());
+                buf.put(b'\n');
                 Ok(())
             }
-            _ => Err(io::Error::new(io::ErrorKind::Other, "no streaming allowed for requests")),
+            _ => Err(io::Error::new(
+                io::ErrorKind::Other,
+                "no streaming allowed for requests",
+            )),
         }
     }
 }
 
-impl<T: Io + 'static> ClientProto<T> for SbtProto {
+impl<T: AsyncRead + AsyncWrite + 'static> ClientProto<T> for SbtProto {
     type Request = CommandMessage;
     type RequestBody = ();
     type Response = EventMessage;
@@ -260,27 +244,19 @@ impl<T: Io + 'static> ClientProto<T> for SbtProto {
             channel_name: None,
         });
 
-        let handshake = transport.into_future()
+        let handshake = transport
+            .into_future()
             .map_err(|(e, _)| e)
             .and_then(|(msg, transport)| match msg {
-                Some(Frame::Message { message: EventMessage::ChannelAcceptedEvent { .. },
-                                      body: false }) => Ok(transport),
+                Some(Frame::Message {
+                    message: EventMessage::ChannelAcceptedEvent { .. },
+                    body: false,
+                }) => Ok(transport),
                 _ => Err(io::Error::new(io::ErrorKind::Other, "invalid handshake")),
             });
 
         Box::new(handshake)
     }
-}
-
-fn parse_json(buf: &[u8]) -> Result<JsonValue, io::Error> {
-    let raw = match str::from_utf8(buf) {
-        Ok(s) => Ok(s.to_string()),
-        Err(_) => Err(io::Error::new(io::ErrorKind::Other, "invalid UTF8 string")),
-    };
-
-    raw.and_then(|s| {
-        json::parse(&s).map_err(|_| io::Error::new(io::ErrorKind::Other, "invalid json"))
-    })
 }
 
 impl Service for Client {
@@ -290,12 +266,12 @@ impl Service for Client {
     type Future = Box<Future<Item = EventStream, Error = io::Error>>;
 
     fn call(&self, req: CommandMessage) -> Self::Future {
-        let into = self.inner
-            .call(req.into())
-            .map_err(|e| {
-                io::Error::new(io::ErrorKind::Other,
-                               format!("Unable to send command ({})", e))
-            });
+        let into = self.inner.call(req.into()).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::Other,
+                format!("Unable to send command ({})", e),
+            )
+        });
 
         Box::new(into.map(EventStream::from))
     }
