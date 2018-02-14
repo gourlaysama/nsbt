@@ -1,53 +1,83 @@
 use std::fmt;
 
-#[derive(Debug)]
+use languageserver_types::{LogMessageParams, MessageType};
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "method", rename_all = "camelCase")]
 pub enum CommandMessage {
-    ExecCommand {
-        command_line: String,
-        exec_id: Option<String>,
+    Initialize {
+        id: u8,
+        jsonrpc: String,
+        params: SbtInitParams,
+    },
+    #[serde(rename = "sbt/exec")]
+    SbtExec {
+        id: u8,
+        jsonrpc: String,
+        params: SbtExecParams,
     },
 }
 
+impl CommandMessage {
+    pub fn initialize(id: u8) -> CommandMessage {
+        CommandMessage::Initialize {
+            id: id,
+            jsonrpc: "2.0".to_string(),
+            params: SbtInitParams {
+                initialization_options: None,
+            },
+        }
+    }
+
+    pub fn sbt_exec(id: u8, command_line: String) -> CommandMessage {
+        CommandMessage::SbtExec {
+            id: id,
+            jsonrpc: "2.0".to_string(),
+            params: SbtExecParams {
+                command_line: command_line,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SbtInitParams {
+    initialization_options: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SbtExecParams {
+    command_line: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde()]
+pub struct EventMessage {
+    pub jsonrpc: String,
+    pub method: String,
+    pub params: LogMessageParams,
+}
+
 #[derive(Debug, Deserialize, Clone)]
-#[serde(tag = "type")]
-pub enum EventMessage {
-    ChannelAcceptedEvent {
-        #[serde(rename = "channelName")]
-        channel_name: String,
-    },
-    StringEvent {
-        level: String,
+#[serde(untagged)]
+pub enum Event {
+    Log {
+        #[serde(rename = "type")]
+        typ: u8,
         message: String,
-        #[serde(rename = "channelName")]
-        channel_name: Option<String>,
-        #[serde(rename = "execId")]
-        exec_id: Option<String>,
-    },
-    ExecStatusEvent {
-        status: String,
-        #[serde(rename = "channelName")]
-        channel_name: Option<String>,
-        #[serde(rename = "execId")]
-        exec_id: Option<String>,
-        #[serde(rename = "commandQueue")]
-        command_queue: Option<Vec<String>>,
     },
 }
 
 impl fmt::Display for EventMessage {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            &EventMessage::ChannelAcceptedEvent { ref channel_name } => {
-                write!(f, "Bound to channel {}", channel_name)
-            }
-            &EventMessage::StringEvent {
-                ref level,
-                ref message,
-                ..
-            } => write!(f, "[{}] {}", level, message),
-            &EventMessage::ExecStatusEvent { ref status, .. } => {
-                write!(f, "[exec event] {}", status)
-            }
-        }
+        let typ = match self.params.typ {
+            MessageType::Error => "error",
+            MessageType::Info => "info",
+            MessageType::Log => "info",
+            MessageType::Warning => "warn",
+        };
+        write!(f, "[{}] {}", typ, self.params.message)
     }
 }

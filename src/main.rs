@@ -4,29 +4,29 @@ extern crate futures;
 #[macro_use]
 extern crate log;
 extern crate nsbt;
-extern crate rand;
-extern crate rustyline;
 extern crate simplelog;
 extern crate tokio_core;
-extern crate tokio_service;
+extern crate tokio_io;
+extern crate tokio_uds;
 
-use std::cell::RefCell;
-use std::error::Error;
-use std::fs::File;
-use std::rc::Rc;
-use std::{io, thread};
+use std::{env, io};
 
 use clap::{App, Arg};
-use futures::{BoxFuture, Future, Stream};
-use futures::sync::oneshot;
-use nsbt::{messages, Client};
-use rustyline::Editor;
-use rustyline::error::ReadlineError;
-use simplelog::*;
+use futures::{stream, Future, Stream};
+use nsbt::sbt_utils;
+use nsbt::proto::SbtProto;
+use simplelog::{Config, LevelFilter, TermLogger};
 use tokio_core::reactor::Core;
-use tokio_service::Service;
+use tokio_uds::UnixStream;
 
 fn main() {
+    std::process::exit(match run() {
+        Ok(_) => 0,
+        Err(_) => 1,
+    });
+}
+
+fn run() -> Result<(), ()> {
     let matches = App::new("nsbt")
         .version(crate_version!())
         .author(crate_authors!())
@@ -65,137 +65,74 @@ If no command is specified, an interactive shell is displayed.",
         )
         .get_matches();
 
-    let level = match matches.occurrences_of("v") {
-        0 => LevelFilter::Info,
-        1 => LevelFilter::Debug,
+    let log_level = match matches.occurrences_of("v") {
+        0 => LevelFilter::Warn,
+        1 => LevelFilter::Info,
+        2 => LevelFilter::Debug,
         _ => LevelFilter::Trace,
     };
-    TermLogger::init(
-        level,
-        Config {
-            time: Some(Level::Debug),
-            level: Some(Level::Error),
-            target: Some(Level::Debug),
-            location: Some(Level::Trace),
-            time_format: None,
-        },
-    ).unwrap();
+
+    TermLogger::init(log_level, Config::default()).unwrap();
+
+    let path = match sbt_utils::lookup_from(&env::current_dir().unwrap()) {
+        Ok(Some(path)) => path,
+        Ok(None) => {
+            error!("Cound not find running sbt server.");
+            return Err(());
+        }
+        Err(e) => {
+            error!("{}", e);
+            return Err(());
+        }
+    };
 
     let mut core = Core::new().unwrap();
     let handle = core.handle();
 
-    let addr = format!(
-        "{}:{}",
-        matches.value_of("host").unwrap(),
-        matches.value_of("port").unwrap()
-    ).parse()
-        .unwrap();
+    let stream = UnixStream::connect(path, &handle).unwrap();
 
-    let commands = matches.values_of_lossy("commands");
-    let go_to_shell = match commands {
-        None => true,
-        Some(ref c) => c.iter().any(|s| s == ":shell"),
-    };
-    let commands = commands.map(|c| c.into_iter());
-    let rcmds = commands.map(|c| Rc::new(RefCell::new(c)));
-    //let b_commands = commands.map(|c| c.as_ref());
+    let proto = SbtProto::init(stream);
 
-    let evt_loop = core.run(
-        Client::connect(&addr, &handle)
-            .and_then(|client| {
-                info!("[client] Connected to sbt server at '{}'", &addr);
-                if go_to_shell {
-                    info!("[client] Run ':exit' to close the shell.");
-                }
-                let client = Rc::new(client);
-                futures::stream::repeat((client, rcmds)).for_each(|(cl, cds)| {
-                    let next_command = futures::future::result(
-                        cds.ok_or(futures::Canceled)
-                            .and_then(|c| c.borrow_mut().next().ok_or(futures::Canceled)),
-                    ).then(|e| match e {
-                        Ok(ref s) if s == ":shell" => Err(futures::Canceled),
-                        Ok(a) => Ok(Some(a)),
-                        Err(a) => Err(a),
-                    });
+    let commands = matches.values_of_lossy("commands").unwrap_or(vec![]);
+    let commands = stream::iter_ok::<_, io::Error>(commands);
 
-                    let input = next_command
-                        .or_else(|_| {
-                            if go_to_shell {
-                                readline2()
-                            } else {
-                                futures::future::ok(None).boxed()
-                            }
-                        })
-                        .then(|f| match f {
-                            Ok(Some(s)) => Ok(s),
-                            Ok(None) => {
-                                if go_to_shell {
-                                    info!("[client] Closing shell.");
-                                }
-                                // we use an error to break out of the infinite stream above
-                                // TODO: use something better than io::Error everywhere
-                                Err(io::Error::new(io::ErrorKind::Other, "Closing"))
-                            }
-                            Err(_) => Err(io::Error::new(io::ErrorKind::Other, "Readline error")),
-                        })
-                        .and_then(move |s| {
-                            let response = cl.call(messages::CommandMessage::ExecCommand {
-                                command_line: s,
-                                exec_id: Some(format!("nsbt-exec-{}", rand::random::<u32>())),
-                            });
+    let task = commands
+        .into_future()
+        .map_err(|(e, _)| e)
+        .join(proto)
+        .and_then(|((c, cs), proto)| process_command(c, cs, proto));
 
-                            response.and_then(|s| {
-                                s.for_each(|event| {
-                                    info!("[server] {}", event);
-                                    Ok(())
-                                })
-                            })
-                        });
+    //let task = proto.and_then(|p| p.call("show scalaVersion"));
 
-                    input
-                })
-            })
-            .then(|o| match o {
-                // the stream above is infinite so this never happens
-                Ok(a) => Ok(a),
-                // we transform a "Closing" error into a graceful exit from the event loop
-                Err(ref e) if e.description() == "Closing" => Ok(()),
-                Err(e) => Err(e),
-            }),
-    );
+    let evt_loop = core.run(task.map(|_| ()));
 
-    match evt_loop {
-        Err(e) => {
-            error!("[client] {}", e);
-            std::process::exit(-1);
-        }
-        Ok(_) => (),
-    }
+    evt_loop.map_err(|e| {
+        error!("{}", e);
+        ()
+    })
 }
 
-fn readline2() -> BoxFuture<Option<String>, futures::Canceled> {
-    let (tx, rx) = oneshot::channel();
-
-    thread::spawn(|| {
-        let mut editor = Editor::<()>::new();
-
-        let readline = editor.readline("> ");
-        match readline {
-            Ok(ref str) if str == ":exit" => {
-                tx.send(None).unwrap();
-            }
-            Ok(line) => {
-                tx.send(Some(line)).unwrap();
-            }
-            Err(ReadlineError::Eof) | Err(ReadlineError::Interrupted) => {
-                tx.send(None).unwrap();
-            }
-            Err(err) => {
-                error!("{:?}", err);
-                tx.send(None).unwrap();
-            }
+fn process_command<'a, S: 'a>(
+    c: Option<String>,
+    c_stream: S,
+    proto: SbtProto,
+) -> Box<Future<Item = ((Option<String>, S), SbtProto), Error = io::Error> + 'a>
+where
+    S: Stream<Item = String, Error = io::Error>,
+{
+    match c {
+        Some(command) => {
+            trace!("New command: '{}'", command);
+            Box::new(proto.call(&command).and_then(|proto| {
+                c_stream
+                    .into_future()
+                    .map_err(|(e, _)| e)
+                    .and_then(|cc| process_command(cc.0, cc.1, proto))
+            }))
         }
-    });
-
-    rx.boxed()
+        None => {
+            trace!("No more commands, stopping.");
+            Box::new(futures::future::ok(((None, c_stream), proto)))
+        }
+    }
 }
