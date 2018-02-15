@@ -43,8 +43,12 @@ impl SbtProto {
         }))
     }
 
-    pub fn call(self, command: &str) -> Box<Future<Item = SbtProto, Error = io::Error>> {
-        debug!("Calling with command '{}'", command);
+    pub fn call(
+        self,
+        command: &str,
+        first: bool,
+    ) -> Box<Future<Item = SbtProto, Error = io::Error>> {
+        debug!("Calling with command '{}', first={}", command, first);
         let next_id = self.next_id;
         let exec_str =
             serde_json::to_string(&CommandMessage::sbt_exec(next_id, command.to_string())).unwrap();
@@ -52,7 +56,7 @@ impl SbtProto {
         let t_stream = self.stream;
 
         let fut = f_sink.and_then(move |t_sink| {
-            let t_stream = process_event(t_stream, false);
+            let t_stream = process_event(t_stream, false, first);
             t_stream.map(move |t_stream| SbtProto {
                 sink: t_sink,
                 stream: t_stream,
@@ -67,6 +71,7 @@ impl SbtProto {
 fn process_event<'a, S: 'a>(
     t_stream: S,
     waiting: bool,
+    first: bool,
 ) -> Box<Future<Item = S, Error = io::Error> + 'a>
 where
     S: Stream<Item = String, Error = io::Error>,
@@ -80,36 +85,44 @@ where
         })
         .and_then(|(event, t_stream)| {
             let ev = serde_json::from_str::<EventMessage>(&event);
-            ev.map(|e| (e, t_stream)).map_err(|er| io::Error::new(io::ErrorKind::InvalidData, er))
-        }).and_then(move |(ev, t_stream)| {
-            match ev {
-                EventMessage::Log(LogMessageParams { ref message, .. }) => {
-                    match (message.as_ref(), waiting) {
-                        ("Processing", false) => {
-                            debug!("Processing started.");
-                            process_event(t_stream, true)
-                        }
-                        ("Done", true) => {
-                            debug!("Processing done.");
+            ev.map(|e| (e, t_stream))
+                .map_err(|er| io::Error::new(io::ErrorKind::InvalidData, er))
+        })
+        .and_then(move |(ev, t_stream)| match ev {
+            EventMessage::Log(LogMessageParams { ref message, .. }) => {
+                match (message.as_ref(), waiting) {
+                    ("Processing", false) => {
+                        debug!("Processing 1 started.");
+                        process_event(t_stream, false, first)
+                    }
+                    ("Done", true) => {
+                        debug!("Processing 2 done.");
+                        Box::new(future::ok(t_stream))
+                    }
+                    ("Processing", true) => {
+                        debug!("Processing 2 started.");
+                        process_event(t_stream, true, first)
+                    }
+                    ("Done", false) => {
+                        debug!("Processing 1 done.");
+                        if first {
+                            process_event(t_stream, true, first)
+                        } else {
                             Box::new(future::ok(t_stream))
                         }
-                        ("Processing", true) => {
-                            Box::new(future::err(io::Error::from(io::ErrorKind::InvalidData)))
-                        }
-                        ("Done", false) => {
-                            Box::new(future::err(io::Error::from(io::ErrorKind::InvalidData)))
-                        }
-                        _ => {
-                            println!("{}", ev);
-                            process_event(t_stream, true)
-                        }
+                    }
+                    _ => {
+                        println!("{}", ev);
+                        process_event(t_stream, waiting, first)
                     }
                 }
-                EventMessage::Diagnostic(PublishDiagnosticsParams { ref diagnostics, ..}) => {
-                    debug!("Received diagnostics: {:?}", diagnostics);
-                    println!("{}", ev);
-                    process_event(t_stream, waiting)
-                }
+            }
+            EventMessage::Diagnostic(PublishDiagnosticsParams {
+                ref diagnostics, ..
+            }) => {
+                debug!("Received diagnostics: {:?}", diagnostics);
+                println!("{}", ev);
+                process_event(t_stream, waiting, first)
             }
         });
 

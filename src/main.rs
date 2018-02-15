@@ -100,7 +100,7 @@ If no command is specified, an interactive shell is displayed.",
         .into_future()
         .map_err(|(e, _)| e)
         .join(proto)
-        .and_then(|((c, cs), proto)| process_command(c, cs, proto));
+        .and_then(|((c, cs), proto)| process_command(c, cs, proto, true));
 
     //let task = proto.and_then(|p| p.call("show scalaVersion"));
 
@@ -116,6 +116,7 @@ fn process_command<'a, S: 'a>(
     c: Option<String>,
     c_stream: S,
     proto: SbtProto,
+    first: bool,
 ) -> Box<Future<Item = ((Option<String>, S), SbtProto), Error = io::Error> + 'a>
 where
     S: Stream<Item = String, Error = io::Error>,
@@ -123,11 +124,11 @@ where
     match c {
         Some(command) => {
             trace!("New command: '{}'", command);
-            Box::new(proto.call(&command).and_then(|proto| {
+            Box::new(proto.call(&command, first).and_then(|proto| {
                 c_stream
                     .into_future()
                     .map_err(|(e, _)| e)
-                    .and_then(|cc| process_command(cc.0, cc.1, proto))
+                    .and_then(|cc| process_command(cc.0, cc.1, proto, false))
             }))
         }
         None => {
