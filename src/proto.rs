@@ -57,10 +57,13 @@ impl SbtProto {
 
         let fut = f_sink.and_then(move |t_sink| {
             let t_stream = process_event(t_stream, false, first);
-            t_stream.map(move |t_stream| SbtProto {
-                sink: t_sink,
-                stream: t_stream,
-                next_id: next_id + 1,
+            t_stream.map(move |t_stream| {
+                info!("Finished running command.");
+                SbtProto {
+                    sink: t_sink,
+                    stream: t_stream,
+                    next_id: next_id + 1,
+                }
             })
         });
 
@@ -121,7 +124,7 @@ where
                 ref diagnostics, ..
             }) => {
                 debug!("Received diagnostics: {:?}", diagnostics);
-                println!("{}", ev);
+                print!("{}", ev);
                 process_event(t_stream, waiting, first)
             }
         });

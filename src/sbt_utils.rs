@@ -16,7 +16,7 @@ pub fn lookup_from(start: &Path) -> Result<Option<PathBuf>, io::Error> {
     match find_port_file(start) {
         None => Ok(None),
         Some(port_file) => {
-            debug!("Found port file '{:?}'", port_file);
+            debug!("Found port file {:?}", port_file);
             let file = File::open(port_file)?;
             let s: SbtPortFile = serde_json::from_reader(file)?;
             match s.uri.scheme() {
@@ -48,7 +48,7 @@ fn find_port_file(start: &Path) -> Option<PathBuf> {
         port_path.push("target");
         port_path.push("active.json");
 
-        trace!("Testing for port file '{:?}'", port_path);
+        trace!("Testing for port file {:?}", port_path);
 
         if port_path.exists() && !port_path.is_dir() {
             return Some(port_path);
@@ -57,6 +57,6 @@ fn find_port_file(start: &Path) -> Option<PathBuf> {
         }
     }
 
-    debug!("No port file found (startup point: '{:?}')", start);
+    debug!("No port file found (startup point: {:?})", start);
     None
 }

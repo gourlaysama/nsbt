@@ -77,7 +77,7 @@ If no command is specified, an interactive shell is displayed.",
     let path = match sbt_utils::lookup_from(&env::current_dir().unwrap()) {
         Ok(Some(path)) => path,
         Ok(None) => {
-            error!("Cound not find running sbt server.");
+            error!("Cound not find a running sbt server. Re-run with '-vvv' for diagnostics.");
             return Err(());
         }
         Err(e) => {
@@ -102,8 +102,6 @@ If no command is specified, an interactive shell is displayed.",
         .join(proto)
         .and_then(|((c, cs), proto)| process_command(c, cs, proto, true));
 
-    //let task = proto.and_then(|p| p.call("show scalaVersion"));
-
     let evt_loop = core.run(task.map(|_| ()));
 
     evt_loop.map_err(|e| {
@@ -123,7 +121,7 @@ where
 {
     match c {
         Some(command) => {
-            trace!("New command: '{}'", command);
+            info!("Sending command '{}'", command);
             Box::new(proto.call(&command, first).and_then(|proto| {
                 c_stream
                     .into_future()
@@ -132,7 +130,7 @@ where
             }))
         }
         None => {
-            trace!("No more commands, stopping.");
+            debug!("No more commands, stopping.");
             Box::new(futures::future::ok(((None, c_stream), proto)))
         }
     }
