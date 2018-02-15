@@ -1,6 +1,7 @@
 use std::fmt;
 
-use languageserver_types::{LogMessageParams, MessageType};
+use languageserver_types::{DiagnosticSeverity, LogMessageParams, MessageType,
+                           PublishDiagnosticsParams};
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "method", rename_all = "camelCase")]
@@ -53,31 +54,48 @@ pub struct SbtExecParams {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde()]
-pub struct EventMessage {
-    pub jsonrpc: String,
-    pub method: String,
-    pub params: LogMessageParams,
-}
-
-#[derive(Debug, Deserialize, Clone)]
-#[serde(untagged)]
-pub enum Event {
-    Log {
-        #[serde(rename = "type")]
-        typ: u8,
-        message: String,
-    },
+#[serde(tag = "method", content = "params")]
+pub enum EventMessage {
+    #[serde(rename = "window/logMessage")]
+    Log(LogMessageParams),
+    #[serde(rename = "textDocument/publishDiagnostics")]
+    Diagnostic(PublishDiagnosticsParams),
 }
 
 impl fmt::Display for EventMessage {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let typ = match self.params.typ {
-            MessageType::Error => "error",
-            MessageType::Info => "info",
-            MessageType::Log => "info",
-            MessageType::Warning => "warn",
-        };
-        write!(f, "[{}] {}", typ, self.params.message)
+        match self {
+            &EventMessage::Log(LogMessageParams { typ, ref message }) => {
+                let typ = match typ {
+                    MessageType::Error => "error",
+                    MessageType::Info => "info",
+                    MessageType::Log => "info",
+                    MessageType::Warning => "warn",
+                };
+                write!(f, "[{}] {}", typ, message)
+            }
+            &EventMessage::Diagnostic(PublishDiagnosticsParams {
+                ref uri,
+                ref diagnostics,
+            }) => {
+                for d in diagnostics {
+                    let typ = match d.severity {
+                        Some(DiagnosticSeverity::Warning) => "warn",
+                        Some(DiagnosticSeverity::Error) => "error",
+                        _ => "info",
+                    };
+                    write!(
+                        f,
+                        "[{}] {}:{}:{}: {}\n",
+                        typ,
+                        uri.path(),
+                        d.range.start.line + 1,
+                        d.range.start.character + 1,
+                        d.message
+                    )?;
+                };
+                Ok(())
+            }
+        }
     }
 }

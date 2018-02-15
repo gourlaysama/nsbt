@@ -3,6 +3,7 @@ use std::io;
 use codec::JsonRpcFramingCodec;
 use futures::{Future, Sink, Stream};
 use futures::future;
+use languageserver_types::{LogMessageParams, PublishDiagnosticsParams};
 use serde_json;
 use tokio_io::AsyncRead;
 use tokio_uds::UnixStream;
@@ -49,16 +50,13 @@ impl SbtProto {
             serde_json::to_string(&CommandMessage::sbt_exec(next_id, command.to_string())).unwrap();
         let f_sink = self.sink.send(exec_str);
         let t_stream = self.stream;
-        
 
         let fut = f_sink.and_then(move |t_sink| {
             let t_stream = process_event(t_stream, false);
-            t_stream.map(move |t_stream| {
-                SbtProto {
+            t_stream.map(move |t_stream| SbtProto {
                 sink: t_sink,
                 stream: t_stream,
-                next_id: next_id + 1
-            }
+                next_id: next_id + 1,
             })
         });
 
@@ -66,7 +64,10 @@ impl SbtProto {
     }
 }
 
-fn process_event<'a, S: 'a>(t_stream: S, waiting: bool) -> Box<Future<Item = S, Error = io::Error> + 'a>
+fn process_event<'a, S: 'a>(
+    t_stream: S,
+    waiting: bool,
+) -> Box<Future<Item = S, Error = io::Error> + 'a>
 where
     S: Stream<Item = String, Error = io::Error>,
 {
@@ -77,25 +78,40 @@ where
             Some(event) => Ok((event, t_stream)),
             None => Err(io::Error::from(io::ErrorKind::Interrupted)),
         })
-        .and_then(
-            move |(event, t_stream)| {
-                let ev = serde_json::from_str::<EventMessage>(&event).unwrap();
-                let message = ev.params.message;
-                match (message.as_ref(), waiting) {
-                ("Processing", false) => {
-                    debug!("Processing started.");
-                    process_event(t_stream, true)},
-                ("Done", true) => {
-                    debug!("Processing done.");
-                    Box::new(future::ok(t_stream))},
-                ("Processing", true) => Box::new(future::err(io::Error::from(io::ErrorKind::InvalidData))),
-                ("Done", false) => Box::new(future::err(io::Error::from(io::ErrorKind::InvalidData))),
-                _ => {
-                    println!("{}", event);
-                    process_event(t_stream, true)
+        .and_then(|(event, t_stream)| {
+            let ev = serde_json::from_str::<EventMessage>(&event);
+            ev.map(|e| (e, t_stream)).map_err(|er| io::Error::new(io::ErrorKind::InvalidData, er))
+        }).and_then(move |(ev, t_stream)| {
+            match ev {
+                EventMessage::Log(LogMessageParams { ref message, .. }) => {
+                    match (message.as_ref(), waiting) {
+                        ("Processing", false) => {
+                            debug!("Processing started.");
+                            process_event(t_stream, true)
+                        }
+                        ("Done", true) => {
+                            debug!("Processing done.");
+                            Box::new(future::ok(t_stream))
+                        }
+                        ("Processing", true) => {
+                            Box::new(future::err(io::Error::from(io::ErrorKind::InvalidData)))
+                        }
+                        ("Done", false) => {
+                            Box::new(future::err(io::Error::from(io::ErrorKind::InvalidData)))
+                        }
+                        _ => {
+                            println!("{}", ev);
+                            process_event(t_stream, true)
+                        }
+                    }
                 }
-            }},
-        );
+                EventMessage::Diagnostic(PublishDiagnosticsParams { ref diagnostics, ..}) => {
+                    debug!("Received diagnostics: {:?}", diagnostics);
+                    println!("{}", ev);
+                    process_event(t_stream, waiting)
+                }
+            }
+        });
 
-        Box::new(fut)
+    Box::new(fut)
 }
