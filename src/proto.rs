@@ -8,12 +8,12 @@ use serde_json;
 use tokio_io::AsyncRead;
 use tokio_uds::UnixStream;
 
-use messages::{CommandMessage, EventMessage};
+use messages::{CommandMessage, EventMessage, RpcInput};
 
 pub struct SbtProto {
     sink: Box<Sink<SinkItem = String, SinkError = io::Error>>,
     stream: Box<Stream<Item = String, Error = io::Error>>,
-    next_id: u8,
+    next_id: u32,
 }
 
 impl SbtProto {
@@ -50,8 +50,11 @@ impl SbtProto {
     ) -> Box<Future<Item = SbtProto, Error = io::Error>> {
         debug!("Calling with command '{}', first={}", command, first);
         let next_id = self.next_id;
-        let exec_str =
-            serde_json::to_string(&CommandMessage::sbt_exec(next_id, command.to_string())).unwrap();
+        let exec_str = if command.starts_with("show ") {
+            serde_json::to_string(&CommandMessage::sbt_setting(next_id, command.split_at(5).1.to_string())).unwrap()
+        } else {
+            serde_json::to_string(&CommandMessage::sbt_exec(next_id, command.to_string())).unwrap()
+        };
         let f_sink = self.sink.send(exec_str);
         let t_stream = self.stream;
 
@@ -87,12 +90,12 @@ where
             None => Err(io::Error::from(io::ErrorKind::Interrupted)),
         })
         .and_then(|(event, t_stream)| {
-            let ev = serde_json::from_str::<EventMessage>(&event);
+            let ev = serde_json::from_str::<RpcInput>(&event);
             ev.map(|e| (e, t_stream))
                 .map_err(|er| io::Error::new(io::ErrorKind::InvalidData, er))
         })
         .and_then(move |(ev, t_stream)| match ev {
-            EventMessage::Log(LogMessageParams { ref message, .. }) => {
+            RpcInput::Notification(EventMessage::Log(LogMessageParams { ref message, .. })) => {
                 match (message.as_ref(), waiting) {
                     ("Processing", false) => {
                         debug!("Processing 1 started.");
@@ -120,12 +123,24 @@ where
                     }
                 }
             }
-            EventMessage::Diagnostic(PublishDiagnosticsParams {
+            RpcInput::Notification(EventMessage::Diagnostic(PublishDiagnosticsParams {
                 ref diagnostics, ..
-            }) => {
+            })) => {
                 debug!("Received diagnostics: {:?}", diagnostics);
                 print!("{}", ev);
                 process_event(t_stream, waiting, first)
+            }
+            RpcInput::CallResult(ref answer) => {
+                print!("{}", ev);
+                match answer.id.parse::<u32>() {
+                    Ok(id) if id == 1 => Box::new(future::ok(t_stream)),
+                    Err(e) => Box::new(future::err(io::Error::new(io::ErrorKind::InvalidData, e))),
+                    _ => Box::new(future::err(io::Error::new(io::ErrorKind::InvalidData, "Answer to wrong call"))),
+                }
+            },
+            RpcInput::Error(_) => {
+                println!("{}", ev);
+                Box::new(future::ok(t_stream))
             }
         });
 

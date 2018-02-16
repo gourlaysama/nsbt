@@ -1,26 +1,32 @@
 use std::fmt;
 
-use languageserver_types::{DiagnosticSeverity, LogMessageParams, MessageType,
+use languageserver_types::{DiagnosticSeverity, InitializeResult, LogMessageParams, MessageType,
                            PublishDiagnosticsParams};
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "method", rename_all = "camelCase")]
 pub enum CommandMessage {
     Initialize {
-        id: u8,
+        id: u32,
         jsonrpc: String,
         params: SbtInitParams,
     },
     #[serde(rename = "sbt/exec")]
     SbtExec {
-        id: u8,
+        id: u32,
         jsonrpc: String,
         params: SbtExecParams,
+    },
+    #[serde(rename = "sbt/setting")]
+    SbtSettingQuery {
+        id: u32,
+        jsonrpc: String,
+        params: SbtSettingQueryParams,
     },
 }
 
 impl CommandMessage {
-    pub fn initialize(id: u8) -> CommandMessage {
+    pub fn initialize(id: u32) -> CommandMessage {
         CommandMessage::Initialize {
             id: id,
             jsonrpc: "2.0".to_string(),
@@ -30,13 +36,21 @@ impl CommandMessage {
         }
     }
 
-    pub fn sbt_exec(id: u8, command_line: String) -> CommandMessage {
+    pub fn sbt_exec(id: u32, command_line: String) -> CommandMessage {
         CommandMessage::SbtExec {
             id: id,
             jsonrpc: "2.0".to_string(),
             params: SbtExecParams {
                 command_line: command_line,
             },
+        }
+    }
+
+    pub fn sbt_setting(id: u32, setting: String) -> CommandMessage {
+        CommandMessage::SbtSettingQuery {
+            id: id,
+            jsonrpc: "2.0".to_string(),
+            params: SbtSettingQueryParams { setting: setting },
         }
     }
 }
@@ -53,13 +67,50 @@ pub struct SbtExecParams {
     command_line: String,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SbtSettingQueryParams {
+    setting: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", untagged)]
+pub enum RpcInput {
+    Notification(EventMessage),
+    CallResult(RpcAnswer),
+    Error(RpcError),
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RpcError {
+    pub id: String,
+    pub error: RpcErrorResult,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RpcErrorResult {
+    code: i32,
+    pub message: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RpcAnswer {
+    pub id: String,
+    pub result: RpcAnswerResult,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum RpcAnswerResult {
+    #[serde(rename_all = "camelCase")] Setting { value: String, content_type: String },
+    Init(InitializeResult),
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "method", content = "params")]
 pub enum EventMessage {
-    #[serde(rename = "window/logMessage")]
-    Log(LogMessageParams),
-    #[serde(rename = "textDocument/publishDiagnostics")]
-    Diagnostic(PublishDiagnosticsParams),
+    #[serde(rename = "window/logMessage")] Log(LogMessageParams),
+    #[serde(rename = "textDocument/publishDiagnostics")] Diagnostic(PublishDiagnosticsParams),
 }
 
 impl fmt::Display for EventMessage {
@@ -93,9 +144,34 @@ impl fmt::Display for EventMessage {
                         d.range.start.character + 1,
                         d.message
                     )?;
-                };
+                }
                 Ok(())
             }
+        }
+    }
+}
+
+impl fmt::Display for RpcError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "[error] {}", self.error.message)
+    }
+}
+
+impl fmt::Display for RpcAnswer {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self.result {
+            RpcAnswerResult::Init(_) => Ok(()),
+            RpcAnswerResult::Setting { ref value, .. } => write!(f, "[info] {}\n", value),
+        }
+    }
+}
+
+impl fmt::Display for RpcInput {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            &RpcInput::Notification(ref ev) => ev.fmt(f),
+            &RpcInput::CallResult(ref res) => res.fmt(f),
+            &RpcInput::Error(ref e) => e.fmt(f),
         }
     }
 }
