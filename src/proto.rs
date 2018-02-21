@@ -31,6 +31,7 @@ impl SbtProto {
                 .map_err(|(e, _)| e)
                 .and_then(|(item, t_stream)| match item {
                     Some(r) => {
+                        info!("Successfully connected to server.");
                         debug!("Received capabilities: {}", r);
                         Ok(SbtProto {
                             sink: Box::new(t_sink),

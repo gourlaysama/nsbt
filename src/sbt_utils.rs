@@ -51,6 +51,7 @@ fn find_port_file(start: &Path) -> Option<PathBuf> {
         trace!("Testing for port file {:?}", port_path);
 
         if port_path.exists() && !port_path.is_dir() {
+            info!("Found a (probably) running sbt server for project {:?}", path);
             return Some(port_path);
         } else {
             current_path = path.parent();
